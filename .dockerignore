@@ -1,0 +1,13 @@
+.git
+.github
+.vscode
+node_modules
+dist
+coverage
+playwright-report
+test-results
+.env
+README.md
+FRONTEND_INSTRUCTIONS.md
+LICENSE
+logo.png
