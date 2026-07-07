@@ -1,0 +1,98 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        default: dev
+        options:
+          - dev
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: incode-frontend
+  ARGOCD_APP: incode-frontend
+  GITOPS_REPO: git@github.com:Miodrag93/argocd-apps-incode.git
+  GITOPS_VALUES_PATH: incode-frontend/${{ inputs.environment }}.values.yaml
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.vars.outputs.sha_short }}
+
+      - name: Set up SSH for GitOps repo
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.GITOPS_SSH_KEY }}
+
+      - name: Clone GitOps repo
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          git clone "$GITOPS_REPO" gitops-repo
+
+      - name: Update image tag
+        run: |
+          cd gitops-repo
+          yq -i '.image.tag = "${{ steps.vars.outputs.sha_short }}"' "$GITOPS_VALUES_PATH"
+
+      - name: Commit and push
+        run: |
+          cd gitops-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$GITOPS_VALUES_PATH"
+          git commit -m "deploy: incode-frontend ${{ inputs.environment }} -> ${{ steps.vars.outputs.sha_short }}"
+          git push
+
+      - name: Install argocd CLI
+        run: |
+          curl -fsSL -o /usr/local/bin/argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x /usr/local/bin/argocd
+
+      - name: Sync ArgoCD app & wait for healthy
+        env:
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+          ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
+        run: |
+          argocd app sync "$ARGOCD_APP" \
+            --server "$ARGOCD_SERVER" \
+            --auth-token "$ARGOCD_TOKEN" \
+            --grpc-web \
+            --prune \
+            --timeout 300
