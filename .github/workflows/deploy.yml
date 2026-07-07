@@ -1,6 +1,13 @@
 name: Deploy
 
 on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       environment:
@@ -15,7 +22,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: deploy-${{ inputs.environment }}
+  group: deploy-${{ inputs.environment || 'dev' }}
   cancel-in-progress: false
 
 env:
@@ -23,15 +30,18 @@ env:
   ECR_REPOSITORY: incode-frontend
   ARGOCD_APP: incode-frontend
   GITOPS_REPO: git@github.com:Miodrag93/argocd-apps-incode.git
-  GITOPS_VALUES_PATH: incode-frontend/${{ inputs.environment }}.values.yaml
+  GITOPS_VALUES_PATH: incode-frontend/${{ inputs.environment || 'dev' }}.values.yaml
 
 jobs:
   build-and-deploy:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
+    environment: ${{ inputs.environment || 'dev' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set image tag
         id: vars
@@ -77,7 +87,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "$GITOPS_VALUES_PATH"
-          git commit -m "deploy: incode-frontend ${{ inputs.environment }} -> ${{ steps.vars.outputs.sha_short }}"
+          git commit -m "deploy: incode-frontend ${{ inputs.environment || 'dev' }} -> ${{ steps.vars.outputs.sha_short }}"
           git push
 
       - name: Install argocd CLI
